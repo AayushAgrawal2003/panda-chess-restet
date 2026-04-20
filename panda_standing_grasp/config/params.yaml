@@ -1,0 +1,54 @@
+# ── Piece geometry ──
+# Z offset from published piece center to the grasp point on the stem.
+# Positive = above center, negative = below center.
+# Tune this based on where your perception publishes "center".
+# Example: if center is at geometric midpoint (z≈0.045 in local frame)
+# and you want to grasp the stem at z≈0.060, set this to 0.015.
+grasp_z_offset_from_center: 0.015
+
+# Stem radius (m) — for grasp width validation
+stem_radius: 0.010
+
+# ── Grasp parameters ──
+gripper_open_width: 0.04
+gripper_close_width: 0.005
+grasp_force: 5.0          # Newtons for franka_gripper GraspAction
+grasp_epsilon_inner: 0.005
+grasp_epsilon_outer: 0.005
+
+# ── Heights (m, above grasp center) ──
+pre_grasp_height: 0.10
+lift_height: 0.15
+
+# ── Placement ──
+pre_place_offset: 0.10    # how far above place point to start descent
+
+# ── IK / planning ──
+grasp_offset: 0.103       # hand frame to fingertip offset along hand Z
+ik_tol: 0.001
+ik_max_iter: 200
+
+# ── Control ──
+trajectory_velocity_scale: 0.3   # fraction of max joint velocity
+hold_duration: 2.0               # seconds to hold after close/open
+
+# ── Table (for collision checking in planner) ──
+table_height: 0.3
+table_half_size: 0.15
+collision_margin: 0.05
+
+# ── Robot home configuration ──
+home_q: [0.0, -0.5, 0.0, -2.0, 0.0, 1.5, 0.8]
+
+# ── MuJoCo model path (for IK & planning) ──
+# Absolute path to the panda_torque_table.xml used by the planner
+model_xml: ""   # set in launch file
+
+# ── Topic names ──
+piece_pose_topic: /piece_pose
+place_target_topic: /place_target
+
+# ── Action server names ──
+arm_trajectory_action: /position_joint_trajectory_controller/follow_joint_trajectory
+gripper_grasp_action: /franka_gripper/grasp
+gripper_move_action: /franka_gripper/move

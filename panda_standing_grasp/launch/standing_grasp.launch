@@ -1,0 +1,17 @@
+<launch>
+  <arg name="model_xml" default="$(find panda_standing_grasp)/../../franka_emika_panda/panda_torque_table.xml"/>
+  <arg name="rviz" default="true"/>
+
+  <!-- Grasp node -->
+  <node name="panda_standing_grasp" pkg="panda_standing_grasp"
+        type="grasp_node.py" output="screen">
+    <rosparam file="$(find panda_standing_grasp)/config/params.yaml" command="load"/>
+    <param name="model_xml" value="$(arg model_xml)"/>
+  </node>
+
+  <!-- RViz -->
+  <node if="$(arg rviz)"
+        name="rviz" pkg="rviz" type="rviz"
+        args="-d $(find panda_standing_grasp)/rviz/standing_grasp.rviz"
+        output="screen"/>
+</launch>

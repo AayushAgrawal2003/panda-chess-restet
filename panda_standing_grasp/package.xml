@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>panda_standing_grasp</name>
+  <version>0.1.0</version>
+  <description>Top-down grasp of a standing chess piece with Franka Panda</description>
+  <maintainer email="aayush.agrawal2003@gmail.com">Aayush Agrawal</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
+  <exec_depend>control_msgs</exec_depend>
+  <exec_depend>actionlib</exec_depend>
+  <exec_depend>franka_gripper</exec_depend>
+</package>
