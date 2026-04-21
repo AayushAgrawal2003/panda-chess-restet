@@ -3,7 +3,7 @@ project(panda_calibration)
 
 find_package(catkin REQUIRED COMPONENTS
   rospy std_msgs geometry_msgs sensor_msgs
-  visualization_msgs cv_bridge tf2_ros image_transport
+  visualization_msgs cv_bridge tf2_ros
 )
 
 catkin_python_setup()

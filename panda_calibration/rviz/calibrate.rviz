@@ -13,20 +13,6 @@ Visualization Manager:
       Color: 100; 100; 100
       Enabled: true
 
-    - Class: rviz/RobotModel
-      Name: Robot
-      Enabled: true
-      Robot Description: robot_description
-
-    - Class: rviz/TF
-      Name: TF
-      Enabled: true
-      Frame Timeout: 15
-      Marker Scale: 0.12
-      Show Arrows: true
-      Show Axes: true
-      Show Names: true
-
     - Class: rviz/MarkerArray
       Name: Detected Markers
       Enabled: true
@@ -34,15 +20,23 @@ Visualization Manager:
       Queue Size: 10
 
     - Class: rviz/Image
-      Name: Camera View (annotated)
+      Name: Camera View
       Enabled: true
       Topic: /calibration/image
       Transport Hint: raw
       Queue Size: 1
 
+    - Class: rviz/TF
+      Name: TF
+      Enabled: true
+      Frame Timeout: 15
+      Marker Scale: 0.12
+      Show Axes: true
+      Show Names: true
+
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: panda_link0
+    Fixed Frame: camera_color_optical_frame
     Frame Rate: 30
   Name: root
   Tools:
@@ -54,7 +48,7 @@ Visualization Manager:
     Current:
       Class: rviz/Orbit
       Distance: 1.5
-      Focal Point: {X: 0.3, Y: 0.0, Z: 0.4}
+      Focal Point: {X: 0, Y: 0, Z: 0.5}
       Near Clip Distance: 0.01
       Pitch: 0.5
       Target Frame: <Fixed Frame>

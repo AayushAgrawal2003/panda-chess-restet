@@ -2,7 +2,7 @@
 <package format="2">
   <name>panda_calibration</name>
   <version>0.1.0</version>
-  <description>Eye-to-hand camera calibration using ArUco markers on Franka EE</description>
+  <description>Eye-to-hand camera calibration using ArUco markers on Franka EE (frankapy)</description>
   <maintainer email="aayush.agrawal2003@gmail.com">Aayush Agrawal</maintainer>
   <license>MIT</license>
 
@@ -15,5 +15,4 @@
   <exec_depend>visualization_msgs</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
-  <exec_depend>image_transport</exec_depend>
 </package>

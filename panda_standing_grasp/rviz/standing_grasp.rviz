@@ -13,11 +13,6 @@ Visualization Manager:
       Color: 100; 100; 100
       Enabled: true
 
-    - Class: rviz/RobotModel
-      Name: Robot
-      Enabled: true
-      Robot Description: robot_description
-
     - Class: rviz/TF
       Name: TF
       Enabled: true

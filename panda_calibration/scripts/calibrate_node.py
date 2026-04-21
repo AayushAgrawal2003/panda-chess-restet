@@ -4,8 +4,10 @@ Eye-to-hand camera calibration for Franka Panda + RealSense.
 
 Two ArUco markers (ID 0 left, ID 1 right) are attached to the end effector.
 The robot is moved to various poses. At each pose, publish to /calibrate/capture
-to record a sample (EE pose from TF + marker pose from camera). After enough
-samples, publish to /calibrate/solve to compute T_camera_to_base.
+to record a sample (EE pose from frankapy + marker pose from camera). After
+enough samples, publish to /calibrate/solve to compute T_camera_to_base.
+
+EE pose source: frankapy (fa.get_pose()) — no franka_control / TF needed.
 
 Subscribes:
   /camera/color/image_raw    (sensor_msgs/Image)
@@ -17,7 +19,7 @@ Publishes:
   /calibration/image          (sensor_msgs/Image)       — annotated camera view
   /calibration/markers        (visualization_msgs/MarkerArray) — detected markers in RViz
   /calibration/status         (std_msgs/String)         — current status
-  /tf_static                  (after solve)             — camera_color_optical_frame → panda_link0
+  /tf_static                  (after solve)             — panda_link0 → camera_color_optical_frame
 """
 import threading
 import os
@@ -32,15 +34,12 @@ from cv_bridge import CvBridge
 from std_msgs.msg import Empty, String, Header, ColorRGBA
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import (
-    Point, Pose, PoseStamped, Quaternion,
-    TransformStamped, Vector3,
+    Point, Quaternion, TransformStamped, Vector3,
 )
 from visualization_msgs.msg import Marker, MarkerArray
 
+from frankapy import FrankaArm
 
-# ══════════════════════════════════════════════════════════════
-#  Helpers
-# ══════════════════════════════════════════════════════════════
 
 ARUCO_DICTS = {
     "DICT_4X4_50": aruco.DICT_4X4_50,
@@ -62,7 +61,7 @@ CALIB_METHODS = {
 
 
 def rotmat_to_quat(R):
-    """3x3 rotation matrix → [x, y, z, w] quaternion (ROS convention)."""
+    """3x3 rotation matrix -> [x, y, z, w] quaternion (ROS convention)."""
     trace = R[0, 0] + R[1, 1] + R[2, 2]
     if trace > 0:
         s = 0.5 / np.sqrt(trace + 1.0)
@@ -85,26 +84,6 @@ def rotmat_to_quat(R):
     return np.array([x, y, z, w])
 
 
-def tf_to_mat(transform):
-    """geometry_msgs/Transform → 4x4 numpy matrix."""
-    t = transform.translation
-    q = transform.rotation
-    T = np.eye(4)
-    T[:3, 3] = [t.x, t.y, t.z]
-    # quat [x, y, z, w] → rotation matrix
-    x, y, z, w = q.x, q.y, q.z, q.w
-    T[:3, :3] = np.array([
-        [1 - 2*(y*y + z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
-        [2*(x*y + z*w), 1 - 2*(x*x + z*z), 2*(y*z - x*w)],
-        [2*(x*z - y*w), 2*(y*z + x*w), 1 - 2*(x*x + y*y)],
-    ])
-    return T
-
-
-# ══════════════════════════════════════════════════════════════
-#  Calibration Node
-# ══════════════════════════════════════════════════════════════
-
 class CalibrateNode:
     def __init__(self):
         rospy.init_node("panda_calibration")
@@ -116,12 +95,15 @@ class CalibrateNode:
         self.marker_size = rospy.get_param("~marker_size", 0.05)
         self.id_left = rospy.get_param("~marker_id_left", 0)
         self.id_right = rospy.get_param("~marker_id_right", 1)
-        self.base_frame = rospy.get_param("~base_frame", "panda_link0")
-        self.ee_frame = rospy.get_param("~ee_frame", "panda_EE")
         self.min_samples = rospy.get_param("~min_samples", 8)
         method_name = rospy.get_param("~method", "TSAI")
         self.method = CALIB_METHODS.get(method_name, cv2.CALIB_HAND_EYE_TSAI)
         self.output_file = rospy.get_param("~output_file", "calibration_result.yaml")
+
+        # ── Frankapy ──
+        rospy.loginfo("Connecting to FrankaArm...")
+        self.fa = FrankaArm()
+        rospy.loginfo("FrankaArm connected.")
 
         # ── State ──
         self.bridge = CvBridge()
@@ -129,16 +111,10 @@ class CalibrateNode:
         self.dist_coeffs = None
         self.latest_image = None
         self.lock = threading.Lock()
-
-        # Collected samples: list of (T_base_to_ee_4x4, T_cam_to_marker_4x4)
         self.samples = []
-
-        # Calibration result
         self.T_cam_to_base = None
 
-        # ── TF ──
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+        # ── TF (for publishing result only) ──
         self.static_broadcaster = tf2_ros.StaticTransformBroadcaster()
 
         # ── Subscribers ──
@@ -157,12 +133,24 @@ class CalibrateNode:
         self.status_pub = rospy.Publisher(
             "/calibration/status", String, queue_size=1, latch=True)
 
-        self._publish_status("Ready. %d samples collected. "
-                             "Publish to /calibrate/capture to add a sample." % 0)
+        self._publish_status("Ready. 0 samples. Publish /calibrate/capture to add.")
         rospy.loginfo("Calibration node ready.")
         rospy.loginfo("  Markers: ID %d (left), ID %d (right), size=%.3fm",
                       self.id_left, self.id_right, self.marker_size)
-        rospy.loginfo("  TF: %s → %s", self.base_frame, self.ee_frame)
+
+    # ── EE pose from frankapy ──────────────────────────────────
+
+    def _get_ee_pose(self):
+        """Read current EE pose from frankapy as 4x4 matrix."""
+        try:
+            pose = self.fa.get_pose()
+            T = np.eye(4)
+            T[:3, :3] = pose.rotation
+            T[:3, 3] = pose.translation
+            return T
+        except Exception as e:
+            rospy.logwarn("Failed to read EE pose: %s", e)
+            return None
 
     # ── Callbacks ──────────────────────────────────────────────
 
@@ -170,8 +158,7 @@ class CalibrateNode:
         if self.camera_matrix is None:
             self.camera_matrix = np.array(msg.K).reshape(3, 3)
             self.dist_coeffs = np.array(msg.D)
-            rospy.loginfo("Camera intrinsics received. fx=%.1f fy=%.1f cx=%.1f cy=%.1f",
-                          msg.K[0], msg.K[4], msg.K[2], msg.K[5])
+            rospy.loginfo("Camera intrinsics received.")
 
     def _image_cb(self, msg):
         with self.lock:
@@ -180,29 +167,24 @@ class CalibrateNode:
 
     def _capture_cb(self, msg):
         if self.camera_matrix is None:
-            rospy.logwarn("No camera intrinsics yet — cannot capture.")
+            rospy.logwarn("No camera intrinsics yet.")
             return
 
-        # Get EE pose from TF
         T_base_ee = self._get_ee_pose()
         if T_base_ee is None:
-            rospy.logwarn("Cannot read EE pose from TF (%s → %s).",
-                          self.base_frame, self.ee_frame)
             return
 
-        # Detect markers in latest image
         with self.lock:
             img_msg = self.latest_image
         if img_msg is None:
-            rospy.logwarn("No camera image received yet.")
+            rospy.logwarn("No camera image yet.")
             return
 
         detections = self._detect_markers(img_msg)
         if not detections:
-            rospy.logwarn("No ArUco markers detected — sample not captured.")
+            rospy.logwarn("No ArUco markers detected — not captured.")
             return
 
-        # Use first valid detection (prefer left marker)
         T_cam_marker = None
         used_id = None
         for mid in [self.id_left, self.id_right]:
@@ -217,25 +199,20 @@ class CalibrateNode:
 
         self.samples.append((T_base_ee, T_cam_marker))
         n = len(self.samples)
-        rospy.loginfo("Sample %d captured (marker ID %d). EE pos: [%.3f, %.3f, %.3f]",
-                      n, used_id,
-                      T_base_ee[0, 3], T_base_ee[1, 3], T_base_ee[2, 3])
+        rospy.loginfo("Sample %d captured (marker ID %d). EE: [%.3f, %.3f, %.3f]",
+                      n, used_id, *T_base_ee[:3, 3])
         self._publish_status(
-            "%d sample(s) collected. Need %d minimum. "
-            "Publish to /calibrate/solve when ready." % (n, self.min_samples))
+            "%d samples. Need %d min. Publish /calibrate/solve when ready." %
+            (n, self.min_samples))
 
     def _solve_cb(self, msg):
         n = len(self.samples)
         if n < self.min_samples:
-            rospy.logwarn("Only %d samples — need at least %d. Capture more.",
-                          n, self.min_samples)
+            rospy.logwarn("Only %d samples — need %d.", n, self.min_samples)
             return
 
-        rospy.loginfo("Solving eye-to-hand calibration with %d samples (method: %s)...",
-                      n, rospy.get_param("~method", "TSAI"))
+        rospy.loginfo("Solving with %d samples...", n)
 
-        # For eye-to-hand with calibrateHandEye:
-        # pass INVERTED EE poses as "gripper2base" so the result is T_cam_to_base
         R_gripper2base = []
         t_gripper2base = []
         R_target2cam = []
@@ -258,77 +235,30 @@ class CalibrateNode:
         self.T_cam_to_base[:3, :3] = R_cam2base
         self.T_cam_to_base[:3, 3] = t_cam2base.flatten()
 
-        # Compute reprojection-style error: for each sample, the estimated
-        # T_cam_marker should match T_cam_base * T_base_ee * T_ee_marker.
-        # Since we don't know T_ee_marker exactly, report the spread of
-        # T_cam_base estimates from individual sample pairs.
         errors = []
         for T_base_ee, T_cam_marker in self.samples:
-            T_cam_base_est = T_cam_marker @ np.linalg.inv(T_base_ee)
-            t_err = np.linalg.norm(
-                T_cam_base_est[:3, 3] - self.T_cam_to_base[:3, 3])
-            errors.append(t_err)
+            T_est = T_cam_marker @ np.linalg.inv(T_base_ee)
+            errors.append(np.linalg.norm(T_est[:3, 3] - self.T_cam_to_base[:3, 3]))
         mean_err = np.mean(errors) * 1000
         max_err = np.max(errors) * 1000
 
         rospy.loginfo("=== CALIBRATION RESULT ===")
-        rospy.loginfo("T_camera_to_base:")
-        rospy.loginfo("\n%s", np.array2string(self.T_cam_to_base, precision=6))
-        rospy.loginfo("Translation: [%.4f, %.4f, %.4f]",
-                      *self.T_cam_to_base[:3, 3])
-        quat = rotmat_to_quat(self.T_cam_to_base[:3, :3])
-        rospy.loginfo("Quaternion [x,y,z,w]: [%.6f, %.6f, %.6f, %.6f]", *quat)
-        rospy.loginfo("Consistency: mean=%.1fmm, max=%.1fmm (lower is better)",
-                      mean_err, max_err)
+        rospy.loginfo("T_camera_to_base:\n%s",
+                      np.array2string(self.T_cam_to_base, precision=6))
+        rospy.loginfo("Translation: [%.4f, %.4f, %.4f]", *self.T_cam_to_base[:3, 3])
+        q = rotmat_to_quat(self.T_cam_to_base[:3, :3])
+        rospy.loginfo("Quaternion [x,y,z,w]: [%.6f, %.6f, %.6f, %.6f]", *q)
+        rospy.loginfo("Consistency: mean=%.1fmm, max=%.1fmm", mean_err, max_err)
 
-        # Publish static TF
         self._publish_calibration_tf()
-
-        # Save to YAML
         self._save_calibration()
-
         self._publish_status(
-            "CALIBRATED with %d samples. Error: mean=%.1fmm max=%.1fmm. "
-            "TF published." % (n, mean_err, max_err))
-
-    # ── TF ─────────────────────────────────────────────────────
-
-    def _get_ee_pose(self):
-        try:
-            tf = self.tf_buffer.lookup_transform(
-                self.base_frame, self.ee_frame, rospy.Time(0),
-                rospy.Duration(1.0))
-            return tf_to_mat(tf.transform)
-        except (tf2_ros.LookupException,
-                tf2_ros.ConnectivityException,
-                tf2_ros.ExtrapolationException) as e:
-            rospy.logwarn("TF lookup failed: %s", e)
-            return None
-
-    def _publish_calibration_tf(self):
-        if self.T_cam_to_base is None:
-            return
-        T = self.T_cam_to_base
-        quat = rotmat_to_quat(T[:3, :3])
-
-        ts = TransformStamped()
-        ts.header.stamp = rospy.Time.now()
-        ts.header.frame_id = self.base_frame
-        ts.child_frame_id = "camera_color_optical_frame"
-        # We have T_cam_to_base, but TF wants T_base_to_cam (parent→child)
-        T_base_to_cam = np.linalg.inv(T)
-        q = rotmat_to_quat(T_base_to_cam[:3, :3])
-        ts.transform.translation = Vector3(*T_base_to_cam[:3, 3])
-        ts.transform.rotation = Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
-
-        self.static_broadcaster.sendTransform(ts)
-        rospy.loginfo("Published static TF: %s → camera_color_optical_frame",
-                      self.base_frame)
+            "CALIBRATED (%d samples). Error: mean=%.1fmm max=%.1fmm" %
+            (n, mean_err, max_err))
 
     # ── ArUco detection ────────────────────────────────────────
 
     def _detect_markers(self, img_msg):
-        """Detect ArUco markers and return dict {id: T_cam_to_marker (4x4)}."""
         if self.camera_matrix is None:
             return {}
 
@@ -338,18 +268,16 @@ class CalibrateNode:
         detector = aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
         corners, ids, _ = detector.detectMarkers(gray)
 
-        if ids is None or len(ids) == 0:
+        if ids is None:
             return {}
 
-        results = {}
         half = self.marker_size / 2.0
         obj_pts = np.array([
-            [-half,  half, 0],
-            [ half,  half, 0],
-            [ half, -half, 0],
-            [-half, -half, 0],
+            [-half, half, 0], [half, half, 0],
+            [half, -half, 0], [-half, -half, 0],
         ], dtype=np.float32)
 
+        results = {}
         for i, marker_id in enumerate(ids.flatten()):
             if marker_id not in (self.id_left, self.id_right):
                 continue
@@ -363,11 +291,9 @@ class CalibrateNode:
             T[:3, :3] = R
             T[:3, 3] = tvec.flatten()
             results[marker_id] = T
-
         return results
 
     def _detect_and_publish(self, img_msg):
-        """Annotate image with detected markers and publish to RViz."""
         if self.camera_matrix is None:
             return
 
@@ -375,7 +301,7 @@ class CalibrateNode:
         gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
 
         detector = aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
-        corners, ids, rejected = detector.detectMarkers(gray)
+        corners, ids, _ = detector.detectMarkers(gray)
 
         vis = cv_img.copy()
         aruco.drawDetectedMarkers(vis, corners, ids)
@@ -383,10 +309,8 @@ class CalibrateNode:
         if ids is not None:
             half = self.marker_size / 2.0
             obj_pts = np.array([
-                [-half,  half, 0],
-                [ half,  half, 0],
-                [ half, -half, 0],
-                [-half, -half, 0],
+                [-half, half, 0], [half, half, 0],
+                [half, -half, 0], [-half, -half, 0],
             ], dtype=np.float32)
 
             ma = MarkerArray()
@@ -402,13 +326,11 @@ class CalibrateNode:
                 cv2.drawFrameAxes(vis, self.camera_matrix, self.dist_coeffs,
                                   rvec, tvec, self.marker_size * 0.6)
 
-                # Label on image
                 c = corners[i][0][0]
                 label = "LEFT(ID%d)" % marker_id if marker_id == self.id_left else "RIGHT(ID%d)" % marker_id
                 cv2.putText(vis, label, (int(c[0]), int(c[1]) - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-                # RViz marker in camera_color_optical_frame
                 R, _ = cv2.Rodrigues(rvec)
                 q = rotmat_to_quat(R)
                 m = Marker()
@@ -430,7 +352,6 @@ class CalibrateNode:
 
             self.marker_pub.publish(ma)
 
-        # Status overlay
         n = len(self.samples)
         status = "Samples: %d" % n
         if self.T_cam_to_base is not None:
@@ -440,7 +361,22 @@ class CalibrateNode:
 
         self.image_pub.publish(self.bridge.cv2_to_imgmsg(vis, "bgr8"))
 
-    # ── Persistence ────────────────────────────────────────────
+    # ── Output ─────────────────────────────────────────────────
+
+    def _publish_calibration_tf(self):
+        if self.T_cam_to_base is None:
+            return
+        T_base_to_cam = np.linalg.inv(self.T_cam_to_base)
+        q = rotmat_to_quat(T_base_to_cam[:3, :3])
+
+        ts = TransformStamped()
+        ts.header.stamp = rospy.Time.now()
+        ts.header.frame_id = "panda_link0"
+        ts.child_frame_id = "camera_color_optical_frame"
+        ts.transform.translation = Vector3(*T_base_to_cam[:3, 3])
+        ts.transform.rotation = Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
+        self.static_broadcaster.sendTransform(ts)
+        rospy.loginfo("Published static TF: panda_link0 -> camera_color_optical_frame")
 
     def _save_calibration(self):
         if self.T_cam_to_base is None:
@@ -449,31 +385,21 @@ class CalibrateNode:
         q = rotmat_to_quat(T[:3, :3])
         data = {
             "T_camera_to_base": {
-                "translation": {
-                    "x": float(T[0, 3]),
-                    "y": float(T[1, 3]),
-                    "z": float(T[2, 3]),
-                },
+                "translation": {"x": float(T[0, 3]), "y": float(T[1, 3]), "z": float(T[2, 3])},
                 "rotation_quaternion_xyzw": {
-                    "x": float(q[0]),
-                    "y": float(q[1]),
-                    "z": float(q[2]),
-                    "w": float(q[3]),
+                    "x": float(q[0]), "y": float(q[1]),
+                    "z": float(q[2]), "w": float(q[3]),
                 },
                 "rotation_matrix": T[:3, :3].tolist(),
             },
             "num_samples": len(self.samples),
-            "base_frame": self.base_frame,
-            "camera_frame": "camera_color_optical_frame",
         }
         path = self.output_file
         if not os.path.isabs(path):
             path = os.path.join(os.path.expanduser("~"), path)
         with open(path, "w") as f:
             yaml.dump(data, f, default_flow_style=False)
-        rospy.loginfo("Calibration saved to %s", path)
-
-    # ── Helpers ────────────────────────────────────────────────
+        rospy.loginfo("Saved to %s", path)
 
     def _publish_status(self, text):
         self.status_pub.publish(String(data=text))

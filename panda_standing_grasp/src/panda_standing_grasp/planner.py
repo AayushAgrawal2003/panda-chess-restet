@@ -1,11 +1,13 @@
 """
-Grasp planner for standing chess piece — top-down approach.
+Grasp planner for standing chess piece -- top-down approach.
 
-Uses MuJoCo as an offline planning model for IK and collision-free RRT.
+Uses MuJoCo as an offline planning model for IK only.
+Robot motion is handled by frankapy (point-to-point), so no RRT needed.
+
 Coordinate frame convention (from perception):
   - piece_pos  = center of the piece (NOT body origin)
   - piece_quat = orientation with Z pointing up along the piece
-  - X, Y axes  = arbitrary (don't matter — stem is cylindrical)
+  - X, Y axes  = arbitrary (don't matter -- stem is cylindrical)
 
 The grasp point is computed as:
   grasp_center = piece_pos + R_piece @ [0, 0, grasp_z_offset]
@@ -16,9 +18,9 @@ import numpy as np
 import mujoco as mj
 
 
-# ══════════════════════════════════════════════════════════════
+# ======================================================================
 #  Quaternion / rotation helpers
-# ══════════════════════════════════════════════════════════════
+# ======================================================================
 
 def quat_multiply(q1, q2):
     w1, x1, y1, z1 = q1
@@ -71,16 +73,16 @@ def quat_error(q_current, q_target):
     return 2.0 * q_err[1:4]
 
 
-# ══════════════════════════════════════════════════════════════
-#  Grasp geometry — corrected for center-of-piece frame
-# ══════════════════════════════════════════════════════════════
+# ======================================================================
+#  Grasp geometry -- corrected for center-of-piece frame
+# ======================================================================
 
 def calculate_grasp(piece_pos, piece_quat, cfg):
     """Compute top-down grasp targets for a standing piece.
 
     Args:
         piece_pos:  (3,) center of piece from perception
-        piece_quat: (4,) [w,x,y,z] orientation — Z up along piece
+        piece_quat: (4,) [w,x,y,z] orientation -- Z up along piece
         cfg:        dict with grasp_z_offset_from_center, pre_grasp_height,
                     lift_height, gripper_open_width
     Returns:
@@ -88,13 +90,10 @@ def calculate_grasp(piece_pos, piece_quat, cfg):
     """
     R_piece = quat_to_rotmat(piece_quat)
 
-    # Grasp point = piece center + offset along the piece Z axis
-    # Since Z goes up the piece, a positive offset moves toward the top
     grasp_z_offset = cfg["grasp_z_offset_from_center"]
     grasp_center = piece_pos + R_piece @ np.array([0.0, 0.0, grasp_z_offset])
 
-    # Finger approach axis — piece X projected to horizontal
-    # (arbitrary because stem is cylindrical; just pick one)
+    # Finger approach axis -- piece X projected to horizontal
     finger_axis = R_piece @ np.array([1.0, 0.0, 0.0])
     finger_axis[2] = 0.0
     norm = np.linalg.norm(finger_axis)
@@ -150,12 +149,13 @@ def calculate_placement(place_pos, gripper_quat, cfg):
     }
 
 
-# ══════════════════════════════════════════════════════════════
+# ======================================================================
 #  IK solver (uses MuJoCo planning model)
-# ══════════════════════════════════════════════════════════════
+# ======================================================================
 
 class GraspPlanner:
-    """Wraps the MuJoCo-based IK solver and RRT planner."""
+    """Wraps the MuJoCo-based IK solver. Motion planning is handled by
+    frankapy, so no RRT is needed here."""
 
     def __init__(self, model_xml_path, cfg):
         self.cfg = cfg
@@ -238,126 +238,10 @@ class GraspPlanner:
 
         return d.qpos[:7].copy(), False
 
-    # ── RRT planner ──────────────────────────────────────────
-
-    def plan_motion(self, q_start, q_goal, gripper_val, piece_qpos,
-                    max_iter=5000, step_size=0.15, goal_bias=0.2,
-                    smooth_iter=200):
-        model = self.model
-        check_data = mj.MjData(model)
-
-        table_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "table_0")
-        ground_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "ground")
-        obstacles = frozenset({table_id, ground_id})
-
-        piece_body = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "ChessPiece_0")
-        link0_body = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "link0")
-        skip_bodies = frozenset({piece_body, 0, link0_body})
-
-        joint_lo = np.array([model.jnt_range[i, 0] for i in range(7)])
-        joint_hi = np.array([model.jnt_range[i, 1] for i in range(7)])
-        n_piece = len(piece_qpos)
-
-        def col_free(q):
-            check_data.qpos[:7] = q
-            check_data.qpos[7] = gripper_val
-            check_data.qpos[8] = gripper_val
-            check_data.qpos[9:9 + n_piece] = piece_qpos
-            mj.mj_forward(model, check_data)
-            for ci in range(check_data.ncon):
-                c = check_data.contact[ci]
-                if c.geom1 not in obstacles and c.geom2 not in obstacles:
-                    continue
-                other = c.geom2 if c.geom1 in obstacles else c.geom1
-                if model.geom_bodyid[other] in skip_bodies:
-                    continue
-                return False
-            return True
-
-        def edge_free(q1, q2, n=10):
-            for i in range(n + 1):
-                if not col_free(q1 + (i / n) * (q2 - q1)):
-                    return False
-            return True
-
-        if edge_free(q_start, q_goal, n=20):
-            return self._interpolate(q_start, q_goal, 60)
-
-        if not col_free(q_start):
-            return self._interpolate(q_start, q_goal, 60)
-        if not col_free(q_goal):
-            return self._interpolate(q_start, q_goal, 60)
-
-        nodes = [q_start.copy()]
-        parents = [-1]
-        path = None
-
-        for _ in range(max_iter):
-            q_rand = (q_goal.copy() if np.random.random() < goal_bias
-                      else np.random.uniform(joint_lo, joint_hi))
-
-            dists = np.linalg.norm(np.array(nodes) - q_rand, axis=1)
-            nearest_idx = int(np.argmin(dists))
-            q_nearest = nodes[nearest_idx]
-
-            diff = q_rand - q_nearest
-            dist = np.linalg.norm(diff)
-            if dist < 1e-8:
-                continue
-            q_new = (q_nearest + step_size * diff / dist
-                     if dist > step_size else q_rand.copy())
-            q_new = np.clip(q_new, joint_lo, joint_hi)
-
-            if not edge_free(q_nearest, q_new):
-                continue
-
-            nodes.append(q_new.copy())
-            parents.append(nearest_idx)
-
-            if np.linalg.norm(q_new - q_goal) < step_size:
-                if edge_free(q_new, q_goal):
-                    nodes.append(q_goal.copy())
-                    parents.append(len(nodes) - 2)
-                    idx = len(nodes) - 1
-                    path = []
-                    while idx != -1:
-                        path.append(nodes[idx])
-                        idx = parents[idx]
-                    path.reverse()
-                    break
-
-        if path is None:
-            return self._interpolate(q_start, q_goal, 60)
-
-        for _ in range(smooth_iter):
-            if len(path) <= 2:
-                break
-            i = np.random.randint(0, len(path) - 1)
-            j = np.random.randint(i + 2, len(path))
-            if edge_free(path[i], path[j]):
-                path = path[:i + 1] + path[j:]
-
-        segs = []
-        for i in range(len(path) - 1):
-            d = np.linalg.norm(np.array(path[i + 1]) - np.array(path[i]))
-            n_pts = max(10, int(d / 0.02))
-            segs.append(self._interpolate(
-                np.array(path[i]), np.array(path[i + 1]), n_pts))
-        return np.vstack(segs)
-
-    @staticmethod
-    def _interpolate(q_start, q_end, n):
-        traj = np.zeros((n, 7))
-        for i in range(n):
-            t = i / max(n - 1, 1)
-            t = 3 * t**2 - 2 * t**3
-            traj[i] = q_start + t * (q_end - q_start)
-        return traj
-
-    # ── Full plan ────────────────────────────────────────────
+    # -- Full plan --
 
     def plan_full_grasp(self, piece_pos, piece_quat, place_pos):
-        """Compute IK + trajectories for the full pick-and-place sequence.
+        """Compute IK for the full pick-and-place sequence.
 
         Args:
             piece_pos:  (3,) center of piece from perception
@@ -365,7 +249,7 @@ class GraspPlanner:
             place_pos:  (3,) target placement position
 
         Returns:
-            dict with joint configs, trajectories, and success flag
+            dict with joint configs and success flag
         """
         cfg = self.cfg
 
@@ -375,12 +259,6 @@ class GraspPlanner:
         home_q = np.array(cfg["home_q"], dtype=float)
         table_h = cfg["table_height"]
         min_z = table_h + cfg["collision_margin"] + 0.02
-
-        # Inflate table for planning
-        table_gid = mj.mj_name2id(
-            self.model, mj.mjtObj.mjOBJ_GEOM, "table_0")
-        orig_size = self.model.geom_size[table_gid].copy()
-        self.model.geom_size[table_gid][2] += cfg["collision_margin"]
 
         gq = grasp["gripper_quat"]
         pq = place["place_quat"]
@@ -400,33 +278,6 @@ class GraspPlanner:
 
         ik_ok = all([ok1, ok2, ok3, ok4, ok5, ok6])
 
-        # Build a dummy piece qpos for the planner's collision model.
-        # Place piece at the perceived location with standing orientation.
-        piece_qpos = np.concatenate([piece_pos, piece_quat])
-
-        grip_open = cfg["gripper_open_width"]
-        grip_closed = cfg["gripper_close_width"]
-
-        trajs = {
-            "to_home": self._interpolate(
-                np.array(cfg["home_q"]), home_q, 60),
-            "to_pre_grasp": self.plan_motion(
-                home_q, q_pre, grip_open, piece_qpos),
-            "to_grasp": self.plan_motion(
-                q_pre, q_grasp, grip_open, piece_qpos),
-            "to_lift": self.plan_motion(
-                q_grasp, q_lift, grip_closed, piece_qpos),
-            "to_pre_place": self.plan_motion(
-                q_lift, q_pre_place, grip_closed, piece_qpos),
-            "to_place": self.plan_motion(
-                q_pre_place, q_place, grip_closed, piece_qpos),
-            "to_retreat": self.plan_motion(
-                q_place, q_retreat, grip_open, piece_qpos),
-        }
-
-        # Restore table
-        self.model.geom_size[table_gid] = orig_size
-
         return {
             "ik_ok": ik_ok,
             "ik_results": [ok1, ok2, ok3, ok4, ok5, ok6],
@@ -439,7 +290,6 @@ class GraspPlanner:
                 "place": q_place,
                 "retreat": q_retreat,
             },
-            "trajs": trajs,
             "grasp_data": grasp,
             "place_data": place,
         }

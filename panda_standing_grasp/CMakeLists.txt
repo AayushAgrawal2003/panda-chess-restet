@@ -5,9 +5,7 @@ find_package(catkin REQUIRED COMPONENTS
   rospy
   std_msgs
   geometry_msgs
-  trajectory_msgs
-  control_msgs
-  actionlib
+  visualization_msgs
 )
 
 catkin_python_setup()

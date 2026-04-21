@@ -1,20 +1,23 @@
 #!/bin/bash
-# ── One-shot calibration launcher ──
-# Usage: bash calibrate.sh [control-pc-name]
-#
-# Launches everything, then you just move the robot and press ENTER to capture.
+# Usage: bash calibrate.sh [num_samples]
+# Run AFTER:
+#   1. roscore is running
+#   2. frankapy server is running (start_control_pc.sh)
+#   3. RealSense camera is plugged in
+# No franka_control / franka_ros needed.
 
-set -e
-
-CONTROL_PC=${1:?"Usage: bash calibrate.sh <control-pc-name>"}
-ROBOT_IP=${2:-172.16.0.2}
-NUM_SAMPLES=${3:-12}
+NUM_SAMPLES=${1:-12}
 
 echo "============================================"
-echo "  HAND-EYE CALIBRATION"
-echo "  Control PC : $CONTROL_PC"
-echo "  Robot IP   : $ROBOT_IP"
-echo "  Samples    : $NUM_SAMPLES"
+echo "  HAND-EYE CALIBRATION (frankapy)"
+echo "  Samples: $NUM_SAMPLES"
+echo "============================================"
+echo ""
+echo "Prerequisites:"
+echo "  1. roscore running"
+echo "  2. frankapy server running (start_control_pc.sh)"
+echo "  3. Robot lights are BLUE"
+echo "  4. catkin_ws built and sourced"
 echo "============================================"
 
 cleanup() {
@@ -24,56 +27,33 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ── 1. roscore ──
-echo "[1/4] Starting roscore..."
-roscore &
-sleep 3
-
-# ── 2. Robot driver ──
-echo "[2/4] Starting franka_control..."
-roslaunch franka_control franka_control.launch robot_ip:=$ROBOT_IP &
-sleep 5
-
-# ── 3. Camera ──
-echo "[3/4] Starting RealSense..."
-roslaunch realsense2_camera rs_camera.launch align_depth:=true &
-sleep 3
-
-# ── 4. Calibration node + RViz ──
-echo "[4/4] Starting calibration node + RViz..."
 source ~/catkin_ws/devel/setup.bash
-roslaunch panda_calibration calibrate.launch launch_camera:=false &
-sleep 3
+
+# Launch camera + calibration node + RViz (no robot driver needed)
+roslaunch panda_calibration calibrate.launch &
+sleep 5
 
 echo ""
 echo "============================================"
-echo "  READY"
-echo ""
-echo "  1. Move the robot (guide mode: e-stop → squeeze wrist → move)"
-echo "  2. Release e-stop (twist) so lights are BLUE"
-echo "  3. Press ENTER here to capture a sample"
-echo "  4. Repeat for $NUM_SAMPLES poses"
-echo "  5. Calibration runs automatically after $NUM_SAMPLES samples"
+echo "  READY — move robot, press ENTER to capture"
 echo "============================================"
 echo ""
 
 for i in $(seq 1 $NUM_SAMPLES); do
-    read -p "[$i/$NUM_SAMPLES] Move robot to new pose, then press ENTER..."
+    read -p "[$i/$NUM_SAMPLES] Move robot to new pose → ENTER to capture..."
     rostopic pub --once /calibrate/capture std_msgs/Empty "{}"
-    echo "  Captured sample $i."
-    echo ""
+    sleep 1
 done
 
-echo "Solving calibration..."
+echo ""
+echo "Solving..."
 rostopic pub --once /calibrate/solve std_msgs/Empty "{}"
 sleep 2
 
 echo ""
-echo "============================================"
 rostopic echo -n 1 /calibration/status
-echo "============================================"
 echo ""
 echo "Result saved to ~/calibration_result.yaml"
-echo "TF is live in RViz. Press Ctrl+C to exit."
+echo "Press Ctrl+C to exit."
 
 wait
