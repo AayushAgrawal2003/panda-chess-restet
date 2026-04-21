@@ -1,0 +1,20 @@
+<launch>
+  <!-- RealSense camera -->
+  <arg name="launch_camera" default="true"/>
+  <include if="$(arg launch_camera)"
+           file="$(find realsense2_camera)/launch/rs_camera.launch">
+    <arg name="align_depth" value="true"/>
+  </include>
+
+  <!-- Calibration node -->
+  <node name="panda_calibration" pkg="panda_calibration"
+        type="calibrate_node.py" output="screen">
+    <rosparam file="$(find panda_calibration)/config/calibration_params.yaml"
+              command="load"/>
+  </node>
+
+  <!-- RViz -->
+  <node name="rviz" pkg="rviz" type="rviz"
+        args="-d $(find panda_calibration)/rviz/calibrate.rviz"
+        output="screen"/>
+</launch>

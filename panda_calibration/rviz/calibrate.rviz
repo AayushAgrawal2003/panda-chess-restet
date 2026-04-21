@@ -1,0 +1,69 @@
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+  - Class: rviz/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz/Grid
+      Name: Grid
+      Plane Cell Count: 20
+      Cell Size: 0.1
+      Color: 100; 100; 100
+      Enabled: true
+
+    - Class: rviz/RobotModel
+      Name: Robot
+      Enabled: true
+      Robot Description: robot_description
+
+    - Class: rviz/TF
+      Name: TF
+      Enabled: true
+      Frame Timeout: 15
+      Marker Scale: 0.12
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+
+    - Class: rviz/MarkerArray
+      Name: Detected Markers
+      Enabled: true
+      Topic: /calibration/markers
+      Queue Size: 10
+
+    - Class: rviz/Image
+      Name: Camera View (annotated)
+      Enabled: true
+      Topic: /calibration/image
+      Transport Hint: raw
+      Queue Size: 1
+
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: panda_link0
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz/Interact
+    - Class: rviz/MoveCamera
+    - Class: rviz/FocusCamera
+  Value: true
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 1.5
+      Focal Point: {X: 0.3, Y: 0.0, Z: 0.4}
+      Near Clip Distance: 0.01
+      Pitch: 0.5
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz)
+      Yaw: 2.3
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 900
+  Width: 1400
+  X: 100
+  Y: 100
