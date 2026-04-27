@@ -6,7 +6,8 @@ dist/
 build/
 .eggs/
 *.egg
-
+*.mov
+*.mp4
 # Virtual environments
 venv/
 .venv/

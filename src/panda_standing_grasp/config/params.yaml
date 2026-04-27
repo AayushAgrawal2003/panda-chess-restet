@@ -38,5 +38,5 @@ home_q: [0.0, -0.5, 0.0, -2.0, 0.0, 1.5, 0.8]
 model_xml: ""   # set in launch file
 
 # -- Topic names --
-piece_pose_topic: /piece_pose
-place_target_topic: /place_target
+piece_pose_topic: /king_vector
+place_target_topic: /chessboard/square_05

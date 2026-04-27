@@ -6,12 +6,12 @@ Robot motion is handled by frankapy (point-to-point), so no RRT needed.
 
 Coordinate frame convention (from perception):
   - piece_pos  = center of the piece (NOT body origin)
-  - piece_quat = orientation with Z pointing up along the piece
-  - X, Y axes  = arbitrary (don't matter -- stem is cylindrical)
+  - piece_quat = orientation with Y pointing up along the piece
+  - X, Z axes  = arbitrary (don't matter -- stem is cylindrical)
 
 The grasp point is computed as:
-  grasp_center = piece_pos + R_piece @ [0, 0, grasp_z_offset]
-where grasp_z_offset is the signed distance from the published center
+  grasp_center = piece_pos + R_piece @ [0, grasp_y_offset, 0]
+where grasp_y_offset is the signed distance from the published center
 to the desired grasp height on the stem.
 """
 import numpy as np
@@ -82,7 +82,7 @@ def calculate_grasp(piece_pos, piece_quat, cfg):
 
     Args:
         piece_pos:  (3,) center of piece from perception
-        piece_quat: (4,) [w,x,y,z] orientation -- Z up along piece
+        piece_quat: (4,) [w,x,y,z] orientation -- Y up along piece
         cfg:        dict with grasp_z_offset_from_center, pre_grasp_height,
                     lift_height, gripper_open_width
     Returns:
@@ -90,8 +90,8 @@ def calculate_grasp(piece_pos, piece_quat, cfg):
     """
     R_piece = quat_to_rotmat(piece_quat)
 
-    grasp_z_offset = cfg["grasp_z_offset_from_center"]
-    grasp_center = piece_pos + R_piece @ np.array([0.0, 0.0, grasp_z_offset])
+    grasp_y_offset = cfg["grasp_z_offset_from_center"]
+    grasp_center = piece_pos + R_piece @ np.array([0.0, grasp_y_offset, 0.0])
 
     # Finger approach axis -- piece X projected to horizontal
     finger_axis = R_piece @ np.array([1.0, 0.0, 0.0])

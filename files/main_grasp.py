@@ -21,8 +21,8 @@ import argparse
 import sys
 
 # ── Scene config ──────────────────────────────────────────────
-ROOT_MODEL_XML = "franka_emika_panda/panda_torque_table.xml"
-OUTPUT_XML = "franka_emika_panda/grasp_ik_scene.xml"
+ROOT_MODEL_XML = "../src/franka_emika_panda/panda_torque_table.xml"
+OUTPUT_XML = "../src/franka_emika_panda/grasp_ik_scene.xml"
 
 BASE_HOME_Q = np.array([0.0, -0.5, 0.0, -2.0, 0.0, 1.5, 0.8])
 GRIPPER_OPEN = 0.04

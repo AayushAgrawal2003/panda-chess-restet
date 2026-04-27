@@ -1,21 +1,17 @@
 """
-IK-based top-down grasp for a chess piece standing upright on a table.
+IK-based top-down grasp-and-place for 4 standing chess pieces on 4 tables.
 
-Single robot, single piece on the front table.
-The piece spawns standing (no 90° lay-down rotation).
-Gripper approaches from above and grasps the stem.
+Each piece spawns standing upright at a random (x, y, yaw) on its table.
+The robot picks each piece from above (stem grasp) and places it at a random
+target location on the same table. Collision-free motion via RRT.
 
-Markers (always shown, non-colliding):
-  CYAN    sphere = Pre-grasp waypoint
-  YELLOW  sphere = Grasp center (stem mid-point)
-  GREEN   spheres = Left / right finger targets
-  MAGENTA sphere = Lift waypoint
-  ORANGE  sphere = Pre-place waypoint
-  RED     cylinder = Drop target on table
-  RED     sphere = Place waypoint
-  WHITE   sphere = Retreat waypoint
-  BLUE    small spheres = Descent path (pre-grasp → grasp)
-  PINK    small spheres = Approach path (home → pre-grasp)
+Workflow per piece (auto-advances with 0.5s pause):
+  HOME_i → PRE-GRASP → GRASP → CLOSE → LIFT
+         → PRE-PLACE → PLACE → OPEN → RETREAT → next table
+
+Markers:
+  RED cylinder = Drop target on table surface (always shown)
+  Debug markers behind --markers flag.
 """
 import numpy as np
 import mujoco as mj
@@ -26,7 +22,7 @@ import sys
 
 # ── Scene config ──────────────────────────────────────────────
 ROOT_MODEL_XML = "../src/franka_emika_panda/panda_torque_table.xml"
-OUTPUT_XML = "../src/franka_emika_panda/grasp_ik_scene_standing.xml"
+OUTPUT_XML = "../src/franka_emika_panda/grasp_ik_scene_standing_4.xml"
 
 BASE_HOME_Q = np.array([0.0, -0.5, 0.0, -2.0, 0.0, 1.5, 0.8])
 GRIPPER_OPEN = 0.04
@@ -64,14 +60,17 @@ SPAWN_Z = TABLE_HEIGHT + 0.002
 SPAWN_YAW_RANGE = (-0.5, 0.5)
 PLACE_OFFSET = 0.08
 
-NUM_PIECES = 1
+NUM_TABLES = 4
 
-# Single table — front
-TABLE = {"name": "front", "cx": 0.45, "cy": 0.00}
+# 4 tables around the robot
+TABLES = [
+    {"name": "front",     "cx":  0.45, "cy":  0.00},
+    {"name": "right",     "cx":  0.00, "cy": -0.45},
+    {"name": "left",      "cx":  0.00, "cy":  0.45},
+    {"name": "back_left", "cx": -0.32, "cy":  0.32},
+]
 
-# Piece local geometry (from collision model in XML)
-# Base: box half-size 0.016 at local (0.016, 0.016, 0.016) → 32mm cube, bottom at z=0
-# Stem: cylinder r=0.010, half-h=0.030 at local (0.016, 0.016, 0.060) → z=[0.030, 0.090]
+# Piece local geometry
 STEM_LOCAL_CENTER = np.array([0.016, 0.016, 0.060])
 STEM_RADIUS = 0.010
 STEM_HALF_HEIGHT = 0.030
@@ -172,8 +171,8 @@ def random_place_pos(table, grasp_xy):
     return cx, cy
 
 
-def build_scene(piece_pos, piece_quat):
-    """Build XML scene with 1 table and 1 standing chess piece."""
+def build_scene(piece_poses):
+    """Build XML scene with 4 tables and 4 standing chess pieces."""
     modelTree = ET.parse(ROOT_MODEL_XML)
     root = modelTree.getroot()
 
@@ -186,154 +185,116 @@ def build_scene(piece_pos, piece_quat):
 
     worldbody = root.find("worldbody")
 
-    # ── Table ──
+    # ── Tables ──
     table_half_h = TABLE_HEIGHT / 2.0
-    ET.SubElement(worldbody, "geom", {
-        "name": "table_0",
-        "type": "box",
-        "size": f"{TABLE_HALF} {TABLE_HALF} {table_half_h}",
-        "pos": f"{TABLE['cx']} {TABLE['cy']} {table_half_h}",
-        "rgba": "0.4 0.3 0.2 1",
-        "friction": "1.5 0.5 0.1",
-        "contype": "1", "conaffinity": "1"
-    })
+    colors = [
+        "0.4 0.3 0.2 1",
+        "0.3 0.4 0.3 1",
+        "0.3 0.3 0.4 1",
+        "0.4 0.35 0.25 1",
+    ]
+    for i, table in enumerate(TABLES):
+        ET.SubElement(worldbody, "geom", {
+            "name": f"table_{i}",
+            "type": "box",
+            "size": f"{TABLE_HALF} {TABLE_HALF} {table_half_h}",
+            "pos": f"{table['cx']} {table['cy']} {table_half_h}",
+            "rgba": colors[i],
+            "friction": "1.5 0.5 0.1",
+            "contype": "1", "conaffinity": "1"
+        })
 
-    # ── Chess piece (standing) ──
-    body = ET.SubElement(worldbody, "body", {
-        "name": "ChessPiece_0",
-        "pos": f"{piece_pos[0]} {piece_pos[1]} {piece_pos[2]}",
-        "quat": f"{piece_quat[0]} {piece_quat[1]} {piece_quat[2]} {piece_quat[3]}"
-    })
-    ET.SubElement(body, "freejoint", {"name": "chess_piece_joint_0"})
+    # ── Chess pieces (standing) ──
+    for i, (pos, quat) in enumerate(piece_poses):
+        body = ET.SubElement(worldbody, "body", {
+            "name": f"ChessPiece_{i}",
+            "pos": f"{pos[0]} {pos[1]} {pos[2]}",
+            "quat": f"{quat[0]} {quat[1]} {quat[2]} {quat[3]}"
+        })
+        ET.SubElement(body, "freejoint", {"name": f"chess_piece_joint_{i}"})
 
-    ET.SubElement(body, "geom", {
-        "name": "chess_piece_visual_0",
-        "type": "mesh", "mesh": "chess_king_mesh",
-        "rgba": "0.85 0.75 0.55 1",
-        "contype": "0", "conaffinity": "0", "mass": "0"
-    })
-    ET.SubElement(body, "geom", {
-        "name": "chess_piece_base_col_0",
-        "type": "box",
-        "size": "0.016 0.016 0.016",
-        "pos": "0.016 0.016 0.016",
-        "rgba": "0.85 0.75 0.55 0.3",
-        "density": "500",
-        "friction": "1.5 1.5 0.5",
-        "contype": "1", "conaffinity": "1", "condim": "4"
-    })
-    ET.SubElement(body, "geom", {
-        "name": "chess_piece_stem_col_0",
-        "type": "cylinder",
-        "size": "0.010 0.030",
-        "pos": "0.016 0.016 0.060",
-        "rgba": "0.85 0.75 0.55 0.2",
-        "density": "500",
-        "friction": "1.5 0.5 0.1",
-        "contype": "1", "conaffinity": "1", "condim": "4"
-    })
+        ET.SubElement(body, "geom", {
+            "name": f"chess_piece_visual_{i}",
+            "type": "mesh", "mesh": "chess_king_mesh",
+            "rgba": "0.85 0.75 0.55 1",
+            "contype": "0", "conaffinity": "0", "mass": "0"
+        })
+        ET.SubElement(body, "geom", {
+            "name": f"chess_piece_base_col_{i}",
+            "type": "box",
+            "size": "0.016 0.016 0.016",
+            "pos": "0.016 0.016 0.016",
+            "rgba": "0.85 0.75 0.55 0.3",
+            "density": "500",
+            "friction": "1.5 1.5 0.5",
+            "contype": "1", "conaffinity": "1", "condim": "4"
+        })
+        ET.SubElement(body, "geom", {
+            "name": f"chess_piece_stem_col_{i}",
+            "type": "cylinder",
+            "size": "0.010 0.030",
+            "pos": "0.016 0.016 0.060",
+            "rgba": "0.85 0.75 0.55 0.2",
+            "density": "500",
+            "friction": "1.5 0.5 0.1",
+            "contype": "1", "conaffinity": "1", "condim": "4"
+        })
 
     modelTree.write(OUTPUT_XML, encoding="utf-8", xml_declaration=True)
 
 
-def add_markers_to_scene(grasp_data, place_data, place_pos):
-    """Add plenty of non-colliding markers to visualize all waypoints."""
+def add_markers_to_scene(place_positions, show_markers=False,
+                         grasp_data=None, place_data=None):
+    """Add drop-target markers (always) and debug markers (--markers)."""
     modelTree = ET.parse(OUTPUT_XML)
     root = modelTree.getroot()
     worldbody = root.find("worldbody")
-    marker_idx = 0
 
-    def add_sphere(name, pos, rgba, size="0.008"):
+    for i, (px, py) in enumerate(place_positions):
         ET.SubElement(worldbody, "geom", {
-            "name": name, "type": "sphere", "size": size,
-            "pos": f"{pos[0]} {pos[1]} {pos[2]}",
-            "rgba": rgba,
+            "name": f"drop_target_{i}",
+            "type": "cylinder",
+            "size": "0.025 0.001",
+            "pos": f"{px} {py} {TABLE_HEIGHT + 0.001}",
+            "rgba": "1 0.2 0.2 0.8",
             "contype": "0", "conaffinity": "0"
         })
 
-    def add_cylinder(name, pos, rgba, size="0.025 0.001"):
-        ET.SubElement(worldbody, "geom", {
-            "name": name, "type": "cylinder", "size": size,
-            "pos": f"{pos[0]} {pos[1]} {pos[2]}",
-            "rgba": rgba,
-            "contype": "0", "conaffinity": "0"
-        })
+    if show_markers and grasp_data is not None:
+        for i, g in enumerate(grasp_data):
+            if g is None:
+                continue
+            for name, key, rgba in [
+                (f"target_left_{i}", "target_left", "0 1 0 0.9"),
+                (f"target_right_{i}", "target_right", "0 1 0 0.9"),
+                (f"grasp_center_{i}", "grasp_center", "1 1 0 0.9"),
+                (f"pre_grasp_{i}", "pre_grasp_tip", "0 1 1 0.9"),
+            ]:
+                if key in g:
+                    p = g[key]
+                    ET.SubElement(worldbody, "geom", {
+                        "name": name, "type": "sphere", "size": "0.008",
+                        "pos": f"{p[0]} {p[1]} {p[2]}",
+                        "rgba": rgba,
+                        "contype": "0", "conaffinity": "0"
+                    })
 
-    # ── Grasp markers ──
-    g = grasp_data
-
-    # Finger targets (green)
-    add_sphere("marker_finger_left", g["target_left"], "0 1 0 0.9")
-    add_sphere("marker_finger_right", g["target_right"], "0 1 0 0.9")
-
-    # Grasp center (yellow)
-    add_sphere("marker_grasp_center", g["grasp_center"], "1 1 0 0.9", "0.010")
-
-    # Pre-grasp (cyan)
-    add_sphere("marker_pre_grasp", g["pre_grasp_tip"], "0 1 1 0.9", "0.010")
-
-    # Lift (magenta)
-    add_sphere("marker_lift", g["lift_tip"], "1 0 1 0.9", "0.010")
-
-    # Descent path: pre-grasp → grasp (blue small spheres)
-    n_descent = 8
-    for k in range(1, n_descent):
-        t = k / n_descent
-        p = g["pre_grasp_tip"] + t * (g["grasp_tip"] - g["pre_grasp_tip"])
-        add_sphere(f"marker_descent_{k}", p, "0.3 0.3 1 0.7", "0.004")
-
-    # Ascent path: grasp → lift (magenta small spheres)
-    n_ascent = 6
-    for k in range(1, n_ascent):
-        t = k / n_ascent
-        p = g["grasp_tip"] + t * (g["lift_tip"] - g["grasp_tip"])
-        add_sphere(f"marker_ascent_{k}", p, "1 0 1 0.5", "0.004")
-
-    # Finger axis visualization: small markers along finger approach
-    for k in range(1, 5):
-        t = k / 5.0
-        p_left = g["grasp_center"] + t * GRIPPER_OPEN * g["finger_axis"]
-        p_right = g["grasp_center"] - t * GRIPPER_OPEN * g["finger_axis"]
-        add_sphere(f"marker_faxis_l_{k}", p_left, "0 0.7 0 0.5", "0.003")
-        add_sphere(f"marker_faxis_r_{k}", p_right, "0 0.7 0 0.5", "0.003")
-
-    # ── Place markers ──
-    px, py = place_pos
-    p = place_data
-
-    # Drop target disc on table (red cylinder)
-    add_cylinder("marker_drop_target", [px, py, TABLE_HEIGHT + 0.001], "1 0.2 0.2 0.8")
-
-    # Pre-place (orange)
-    add_sphere("marker_pre_place", p["pre_place_tip"], "1 0.5 0 0.9", "0.010")
-
-    # Place (red sphere)
-    add_sphere("marker_place", p["place_tip"], "1 0 0 0.9", "0.010")
-
-    # Retreat (white)
-    add_sphere("marker_retreat", p["retreat_tip"], "1 1 1 0.9", "0.010")
-
-    # Transfer path: lift → pre-place (pink small spheres)
-    n_transfer = 8
-    for k in range(1, n_transfer):
-        t = k / n_transfer
-        pt = g["lift_tip"] + t * (p["pre_place_tip"] - g["lift_tip"])
-        add_sphere(f"marker_transfer_{k}", pt, "1 0.6 0.8 0.5", "0.004")
-
-    # Place descent path: pre-place → place (orange small spheres)
-    n_place_desc = 6
-    for k in range(1, n_place_desc):
-        t = k / n_place_desc
-        pt = p["pre_place_tip"] + t * (p["place_tip"] - p["pre_place_tip"])
-        add_sphere(f"marker_place_desc_{k}", pt, "1 0.5 0 0.5", "0.004")
-
-    # Gripper orientation indicator at grasp: short line along gripper Z (down)
-    gz_start = g["grasp_center"] + np.array([0, 0, 0.02])
-    gz_end = g["grasp_center"] - np.array([0, 0, 0.02])
-    for k in range(5):
-        t = k / 4.0
-        pt = gz_start + t * (gz_end - gz_start)
-        add_sphere(f"marker_gz_{k}", pt, "0.5 0.5 0.5 0.6", "0.002")
+    if show_markers and place_data is not None:
+        for i, p in enumerate(place_data):
+            if p is None:
+                continue
+            for name, key, rgba in [
+                (f"place_center_{i}", "place_center", "1 0 0 0.9"),
+                (f"pre_place_{i}", "pre_place_tip", "1 0.5 0 0.9"),
+            ]:
+                if key in p:
+                    pt = p[key]
+                    ET.SubElement(worldbody, "geom", {
+                        "name": name, "type": "sphere", "size": "0.008",
+                        "pos": f"{pt[0]} {pt[1]} {pt[2]}",
+                        "rgba": rgba,
+                        "contype": "0", "conaffinity": "0"
+                    })
 
     modelTree.write(OUTPUT_XML, encoding="utf-8", xml_declaration=True)
 
@@ -352,7 +313,6 @@ def calculate_grasp_standing(piece_pos, piece_quat):
 
     grasp_center = piece_pos + R_piece @ STEM_LOCAL_CENTER
 
-    # Finger approach axis: piece local Y projected to horizontal plane
     finger_axis = R_piece @ np.array([0.0, 1.0, 0.0])
     finger_axis[2] = 0.0
     finger_axis = finger_axis / np.linalg.norm(finger_axis)
@@ -360,7 +320,6 @@ def calculate_grasp_standing(piece_pos, piece_quat):
     target_left = grasp_center + GRIPPER_OPEN * finger_axis
     target_right = grasp_center - GRIPPER_OPEN * finger_axis
 
-    # Top-down gripper orientation
     gripper_z = np.array([0, 0, -1])
     gripper_y = -finger_axis
     gripper_x = np.cross(gripper_y, gripper_z)
@@ -527,29 +486,37 @@ def hold_position(model, data, v, q_target, gripper_val, duration):
 #  RRT Motion Planner
 # ══════════════════════════════════════════════════════════════
 
-def plan_motion(model, q_start, q_goal, gripper_val, piece_qpos,
+def plan_motion(model, q_start, q_goal, gripper_val, all_piece_qpos,
                 max_rrt_iter=5000, step_size=0.15, goal_bias=0.2,
                 smooth_iter=200):
     check_data = mj.MjData(model)
 
-    table_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "table_0")
+    table_ids = []
+    for i in range(NUM_TABLES):
+        gid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, f"table_{i}")
+        if gid >= 0:
+            table_ids.append(gid)
     ground_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "ground")
-    obstacles = frozenset({table_id, ground_id})
+    obstacles = frozenset(set(table_ids) | {ground_id})
 
-    piece_body = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "ChessPiece_0")
+    piece_bodies = set()
+    for i in range(NUM_TABLES):
+        bid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, f"ChessPiece_{i}")
+        if bid >= 0:
+            piece_bodies.add(bid)
     link0_body = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "link0")
-    skip_bodies = frozenset({piece_body, 0, link0_body})
+    skip_bodies = frozenset(piece_bodies | {0, link0_body})
 
     joint_lo = np.array([model.jnt_range[i, 0] for i in range(7)])
     joint_hi = np.array([model.jnt_range[i, 1] for i in range(7)])
 
-    n_piece_dof = len(piece_qpos)
+    n_piece_dof = len(all_piece_qpos)
 
     def col_free(q):
         check_data.qpos[:7] = q
         check_data.qpos[7] = gripper_val
         check_data.qpos[8] = gripper_val
-        check_data.qpos[9:9 + n_piece_dof] = piece_qpos
+        check_data.qpos[9:9 + n_piece_dof] = all_piece_qpos
         mj.mj_forward(model, check_data)
         for ci in range(check_data.ncon):
             c = check_data.contact[ci]
@@ -644,16 +611,19 @@ def plan_motion(model, q_start, q_goal, gripper_val, piece_qpos,
 #  Experiment runner
 # ══════════════════════════════════════════════════════════════
 
-def run_experiment(seed=None, show_viewer=True):
+def run_experiment(seed=None, show_viewer=True, show_markers=False):
+    """Run one full 4-piece standing pick-and-place experiment."""
     if seed is not None:
         np.random.seed(seed)
 
-    # ── Generate standing piece pose ──
-    pos, quat, yaw = standing_piece_pose(TABLE)
-    print(f"Piece spawned at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}), yaw={yaw:.2f} rad")
+    # ── Generate random standing poses for all pieces ──
+    piece_poses = []
+    for table in TABLES:
+        pos, quat, yaw = standing_piece_pose(table)
+        piece_poses.append((pos, quat))
 
     # ── Build scene ──
-    build_scene(pos, quat)
+    build_scene(piece_poses)
 
     # ── Load and settle ──
     model = mj.MjModel.from_xml_path(OUTPUT_XML)
@@ -663,7 +633,7 @@ def run_experiment(seed=None, show_viewer=True):
     data.qpos[8] = GRIPPER_OPEN
     mj.mj_forward(model, data)
 
-    print("Settling piece...")
+    print("Settling pieces...")
     for _ in range(3000):
         q = data.qpos[:7].copy()
         qd = data.qvel[:7].copy()
@@ -671,149 +641,206 @@ def run_experiment(seed=None, show_viewer=True):
         data.ctrl[7] = GRIPPER_OPEN
         mj.mj_step(model, data)
 
-    # ── Read settled pose ──
-    idx = 9
-    settled_pos = data.qpos[idx:idx + 3].copy()
-    settled_quat = data.qpos[idx + 3:idx + 7].copy()
-    print(f"Settled at ({settled_pos[0]:.3f}, {settled_pos[1]:.3f}, {settled_pos[2]:.3f})")
+    # ── Read settled poses ──
+    settled = []
+    for i in range(NUM_TABLES):
+        idx = 9 + i * 7
+        pos = data.qpos[idx:idx + 3].copy()
+        quat = data.qpos[idx + 3:idx + 7].copy()
+        settled.append((pos, quat))
 
-    # ── Compute grasp + placement ──
-    grasp = calculate_grasp_standing(settled_pos, settled_quat)
+    # ── Compute grasp + placement geometry for all pieces ──
+    grasps = []
+    places = []
+    place_positions = []
+    for i, table in enumerate(TABLES):
+        geom = calculate_grasp_standing(settled[i][0], settled[i][1])
+        grasps.append(geom)
 
-    grasp_xy = grasp["grasp_center"][:2]
-    px, py = random_place_pos(TABLE, grasp_xy)
-    place = calculate_placement_geometry(px, py, grasp["gripper_quat"])
+        grasp_xy = geom["grasp_center"][:2]
+        px, py = random_place_pos(table, grasp_xy)
+        place_positions.append((px, py))
 
-    print(f"Grasp center: ({grasp['grasp_center'][0]:.3f}, {grasp['grasp_center'][1]:.3f}, {grasp['grasp_center'][2]:.3f})")
-    print(f"Place target: ({px:.3f}, {py:.3f})")
+        pg = calculate_placement_geometry(px, py, geom["gripper_quat"])
+        places.append(pg)
 
     # ── Add markers and reload ──
-    add_markers_to_scene(grasp, place, (px, py))
+    add_markers_to_scene(
+        place_positions, show_markers=show_markers,
+        grasp_data=grasps if show_markers else None,
+        place_data=places if show_markers else None,
+    )
 
     model = mj.MjModel.from_xml_path(OUTPUT_XML)
     data = mj.MjData(model)
     data.qpos[:7] = BASE_HOME_Q
     data.qpos[7] = GRIPPER_OPEN
     data.qpos[8] = GRIPPER_OPEN
-    data.qpos[idx:idx + 3] = settled_pos
-    data.qpos[idx + 3:idx + 7] = settled_quat
+    for i in range(NUM_TABLES):
+        idx = 9 + i * 7
+        data.qpos[idx:idx + 3] = settled[i][0]
+        data.qpos[idx + 3:idx + 7] = settled[i][1]
     mj.mj_forward(model, data)
 
-    # ── Inflate table for planning ──
-    table_gid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "table_0")
-    orig_size = model.geom_size[table_gid].copy()
-    model.geom_size[table_gid][2] += COLLISION_MARGIN
+    # ── Inflate all tables for planning ──
+    table_geom_ids = []
+    orig_sizes = []
+    for i in range(NUM_TABLES):
+        gid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, f"table_{i}")
+        table_geom_ids.append(gid)
+        orig_sizes.append(model.geom_size[gid].copy())
+        model.geom_size[gid][2] += COLLISION_MARGIN
 
     min_z = TABLE_HEIGHT + COLLISION_MARGIN + 0.02
 
-    piece_qpos = np.concatenate([settled_pos, settled_quat])
+    all_piece_qpos = np.concatenate(
+        [np.concatenate([s[0], s[1]]) for s in settled]
+    )
 
-    # ── Solve IK ──
-    home_q = home_q_for_table(TABLE)
-    grasp_quat = grasp["gripper_quat"]
-    place_quat = place["place_quat"]
+    # ── Solve IK and plan trajectories for all pieces ──
+    piece_plans = []
+    prev_retreat_q = None
 
-    print("\n--- IK ---")
-    q_pre_grasp, ok1 = compute_ik(model, data, grasp["pre_grasp_tip"], grasp_quat, home_q, min_elbow_z=min_z)
-    q_grasp, ok2     = compute_ik(model, data, grasp["grasp_tip"], grasp_quat, q_pre_grasp, min_elbow_z=min_z)
-    q_lift, ok3       = compute_ik(model, data, grasp["lift_tip"], grasp_quat, q_grasp, min_elbow_z=min_z)
-    q_pre_place, ok4  = compute_ik(model, data, place["pre_place_tip"], place_quat, q_lift, min_elbow_z=min_z)
-    q_place, ok5      = compute_ik(model, data, place["place_tip"], place_quat, q_pre_place, min_elbow_z=min_z)
-    q_retreat, ok6    = compute_ik(model, data, place["retreat_tip"], place_quat, q_place, min_elbow_z=min_z)
+    for i, table in enumerate(TABLES):
+        home_q = home_q_for_table(table)
+        geom = grasps[i]
+        place = places[i]
+        grasp_quat = geom["gripper_quat"]
+        place_quat = place["place_quat"]
 
-    ik_ok = ok1 and ok2 and ok3 and ok4 and ok5 and ok6
-    print(f"  pre_grasp: {'OK' if ok1 else 'FAIL'}  grasp: {'OK' if ok2 else 'FAIL'}  "
-          f"lift: {'OK' if ok3 else 'FAIL'}  pre_place: {'OK' if ok4 else 'FAIL'}  "
-          f"place: {'OK' if ok5 else 'FAIL'}  retreat: {'OK' if ok6 else 'FAIL'}")
+        print(f"\n--- Piece {i} ({table['name']}) IK ---")
+        q_pre_grasp, ok1 = compute_ik(model, data, geom["pre_grasp_tip"], grasp_quat, home_q, min_elbow_z=min_z)
+        q_grasp, ok2 = compute_ik(model, data, geom["grasp_tip"], grasp_quat, q_pre_grasp, min_elbow_z=min_z)
+        q_lift, ok3 = compute_ik(model, data, geom["lift_tip"], grasp_quat, q_grasp, min_elbow_z=min_z)
+        q_pre_place, ok4 = compute_ik(model, data, place["pre_place_tip"], place_quat, q_lift, min_elbow_z=min_z)
+        q_place, ok5 = compute_ik(model, data, place["place_tip"], place_quat, q_pre_place, min_elbow_z=min_z)
+        q_retreat, ok6 = compute_ik(model, data, place["retreat_tip"], place_quat, q_place, min_elbow_z=min_z)
 
-    # ── Plan motions ──
-    print("\n--- Planning ---")
-    print("  HOME → PRE-GRASP:")
-    traj_to_pre = plan_motion(model, home_q, q_pre_grasp, GRIPPER_OPEN, piece_qpos)
-    print("  PRE-GRASP → GRASP:")
-    traj_to_grasp = plan_motion(model, q_pre_grasp, q_grasp, GRIPPER_OPEN, piece_qpos)
-    print("  GRASP → LIFT:")
-    traj_to_lift = plan_motion(model, q_grasp, q_lift, GRIPPER_CLOSED, piece_qpos)
-    print("  LIFT → PRE-PLACE:")
-    traj_to_pre_place = plan_motion(model, q_lift, q_pre_place, GRIPPER_CLOSED, piece_qpos)
-    print("  PRE-PLACE → PLACE:")
-    traj_to_place = plan_motion(model, q_pre_place, q_place, GRIPPER_CLOSED, piece_qpos)
-    print("  PLACE → RETREAT:")
-    traj_to_retreat = plan_motion(model, q_place, q_retreat, GRIPPER_OPEN, piece_qpos)
+        ik_ok = ok1 and ok2 and ok3 and ok4 and ok5 and ok6
+        if not ik_ok:
+            print(f"  WARNING: Not all IK converged for piece {i}")
 
-    # Restore table size
-    model.geom_size[table_gid] = orig_size
+        print(f"--- Piece {i} ({table['name']}) Planning ---")
+        start_q = prev_retreat_q if prev_retreat_q is not None else BASE_HOME_Q
+
+        trajs = {}
+        print(f"  → HOME_{i}:")
+        trajs["to_home"] = plan_motion(model, start_q, home_q, GRIPPER_OPEN, all_piece_qpos)
+        print(f"  HOME_{i} → PRE-GRASP:")
+        trajs["to_pre"] = plan_motion(model, home_q, q_pre_grasp, GRIPPER_OPEN, all_piece_qpos)
+        print(f"  PRE-GRASP → GRASP:")
+        trajs["to_grasp"] = plan_motion(model, q_pre_grasp, q_grasp, GRIPPER_OPEN, all_piece_qpos)
+        print(f"  GRASP → LIFT:")
+        trajs["to_lift"] = plan_motion(model, q_grasp, q_lift, GRIPPER_CLOSED, all_piece_qpos)
+        print(f"  LIFT → PRE-PLACE:")
+        trajs["to_pre_place"] = plan_motion(model, q_lift, q_pre_place, GRIPPER_CLOSED, all_piece_qpos)
+        print(f"  PRE-PLACE → PLACE:")
+        trajs["to_place"] = plan_motion(model, q_pre_place, q_place, GRIPPER_CLOSED, all_piece_qpos)
+        print(f"  PLACE → RETREAT:")
+        trajs["to_retreat"] = plan_motion(model, q_place, q_retreat, GRIPPER_OPEN, all_piece_qpos)
+
+        piece_plans.append({
+            "home_q": home_q,
+            "q_pre_grasp": q_pre_grasp,
+            "q_grasp": q_grasp,
+            "q_lift": q_lift,
+            "q_pre_place": q_pre_place,
+            "q_place": q_place,
+            "q_retreat": q_retreat,
+            "trajs": trajs,
+            "ik_ok": ik_ok,
+        })
+        prev_retreat_q = q_retreat
+
+    # Restore table sizes for simulation
+    for gid, orig in zip(table_geom_ids, orig_sizes):
+        model.geom_size[gid] = orig
 
     # ── Launch viewer ──
     v = None
     if show_viewer:
         v = viewer.launch_passive(model, data)
-        v.cam.distance = 1.2
+        v.cam.distance = 1.5
         v.cam.azimuth = 135
         v.cam.elevation = -30
-        v.cam.lookat[:] = [TABLE["cx"] * 0.5, TABLE["cy"] * 0.5, TABLE_HEIGHT + 0.1]
+        v.cam.lookat[:] = [0, 0, TABLE_HEIGHT + 0.1]
 
-    # ── Execute pick-and-place ──
+    # ── Execute all pick-and-place sequences ──
+    metrics = []
+
     try:
         hold_position(model, data, v, BASE_HOME_Q, GRIPPER_OPEN, PAUSE_SECONDS)
 
-        print("\n>>> Moving to HOME...")
-        traj_home = interpolate_joints(BASE_HOME_Q, home_q, 60)
-        execute_trajectory(model, data, v, traj_home, GRIPPER_OPEN)
-        hold_position(model, data, v, home_q, GRIPPER_OPEN, PAUSE_SECONDS)
+        for i, plan in enumerate(piece_plans):
+            table = TABLES[i]
+            print(f"\n>>> Piece {i} ({table['name']})")
 
-        print(">>> Moving to PRE-GRASP...")
-        execute_trajectory(model, data, v, traj_to_pre, GRIPPER_OPEN)
-        hold_position(model, data, v, q_pre_grasp, GRIPPER_OPEN, PAUSE_SECONDS)
+            print(f"  Moving to HOME_{i}...")
+            execute_trajectory(model, data, v, plan["trajs"]["to_home"], GRIPPER_OPEN)
+            hold_position(model, data, v, plan["home_q"], GRIPPER_OPEN, PAUSE_SECONDS)
 
-        print(">>> Lowering to GRASP...")
-        execute_trajectory(model, data, v, traj_to_grasp, GRIPPER_OPEN)
-        hold_position(model, data, v, q_grasp, GRIPPER_OPEN, PAUSE_SECONDS)
+            print(f"  Moving to PRE-GRASP...")
+            execute_trajectory(model, data, v, plan["trajs"]["to_pre"], GRIPPER_OPEN)
+            hold_position(model, data, v, plan["q_pre_grasp"], GRIPPER_OPEN, PAUSE_SECONDS)
 
-        print(">>> Closing gripper...")
-        hold_position(model, data, v, q_grasp, GRIPPER_CLOSED, 2.0)
+            print(f"  Lowering to GRASP...")
+            execute_trajectory(model, data, v, plan["trajs"]["to_grasp"], GRIPPER_OPEN)
+            hold_position(model, data, v, plan["q_grasp"], GRIPPER_OPEN, PAUSE_SECONDS)
 
-        print(">>> Lifting...")
-        execute_trajectory(model, data, v, traj_to_lift, GRIPPER_CLOSED)
-        hold_position(model, data, v, q_lift, GRIPPER_CLOSED, PAUSE_SECONDS)
+            print(f"  Closing gripper...")
+            hold_position(model, data, v, plan["q_grasp"], GRIPPER_CLOSED, 2.0)
 
-        print(">>> Moving to PRE-PLACE...")
-        execute_trajectory(model, data, v, traj_to_pre_place, GRIPPER_CLOSED)
-        hold_position(model, data, v, q_pre_place, GRIPPER_CLOSED, PAUSE_SECONDS)
+            print(f"  Lifting...")
+            execute_trajectory(model, data, v, plan["trajs"]["to_lift"], GRIPPER_CLOSED)
+            hold_position(model, data, v, plan["q_lift"], GRIPPER_CLOSED, PAUSE_SECONDS)
 
-        print(">>> Lowering to PLACE...")
-        execute_trajectory(model, data, v, traj_to_place, GRIPPER_CLOSED)
-        hold_position(model, data, v, q_place, GRIPPER_CLOSED, PAUSE_SECONDS)
+            print(f"  Moving to PRE-PLACE...")
+            execute_trajectory(model, data, v, plan["trajs"]["to_pre_place"], GRIPPER_CLOSED)
+            hold_position(model, data, v, plan["q_pre_place"], GRIPPER_CLOSED, PAUSE_SECONDS)
 
-        print(">>> Releasing piece...")
-        hold_position(model, data, v, q_place, GRIPPER_OPEN, 2.0)
+            print(f"  Lowering to PLACE...")
+            execute_trajectory(model, data, v, plan["trajs"]["to_place"], GRIPPER_CLOSED)
+            hold_position(model, data, v, plan["q_place"], GRIPPER_CLOSED, PAUSE_SECONDS)
 
-        print(">>> Retreating...")
-        execute_trajectory(model, data, v, traj_to_retreat, GRIPPER_OPEN)
-        hold_position(model, data, v, q_retreat, GRIPPER_OPEN, PAUSE_SECONDS)
+            print(f"  Releasing piece...")
+            hold_position(model, data, v, plan["q_place"], GRIPPER_OPEN, 2.0)
 
-        # Let piece settle
-        hold_position(model, data, v, q_retreat, GRIPPER_OPEN, 1.0)
+            print(f"  Retreating...")
+            execute_trajectory(model, data, v, plan["trajs"]["to_retreat"], GRIPPER_OPEN)
+            hold_position(model, data, v, plan["q_retreat"], GRIPPER_OPEN, PAUSE_SECONDS)
 
-        # ── Measure ──
-        final_pos = data.qpos[idx:idx + 3].copy()
-        final_quat = data.qpos[idx + 3:idx + 7].copy()
-        R_final = quat_to_rotmat(final_quat)
+            hold_position(model, data, v, plan["q_retreat"], GRIPPER_OPEN, 1.0)
 
-        target_xy = np.array([px, py])
-        actual_xy = final_pos[:2]
-        xy_error = np.linalg.norm(target_xy - actual_xy)
-        upright = R_final[2, 2] > 0.95
+            # ── Measure metrics ──
+            idx = 9 + i * 7
+            final_pos = data.qpos[idx:idx + 3].copy()
+            final_quat = data.qpos[idx + 3:idx + 7].copy()
+            R_final = quat_to_rotmat(final_quat)
 
-        print(f"\n--- Results ---")
-        print(f"  XY error: {xy_error * 1000:.1f} mm")
-        print(f"  Upright:  {upright}")
-        print(f"  IK OK:    {ik_ok}")
+            target_xy = np.array(place_positions[i])
+            actual_xy = final_pos[:2]
+            xy_error = np.linalg.norm(target_xy - actual_xy)
+            upright = R_final[2, 2] > 0.95
 
-        print("\n>>> DONE. Close viewer to exit.")
+            metrics.append({
+                "table": table["name"],
+                "piece_idx": i,
+                "target_xy": target_xy,
+                "actual_xy": actual_xy,
+                "xy_error": xy_error,
+                "upright": upright,
+                "ik_ok": plan["ik_ok"],
+            })
+
+            print(f"  XY error: {xy_error:.4f}m | Upright: {upright}")
+
+        print("\n>>> ALL PIECES DONE.")
+
         if v is not None:
+            print("Close viewer to exit.")
             while v.is_running():
-                hold_position(model, data, v, q_retreat, GRIPPER_OPEN, 0.05)
+                q_last = piece_plans[-1]["q_retreat"]
+                hold_position(model, data, v, q_last, GRIPPER_OPEN, 0.05)
 
     except KeyboardInterrupt:
         pass
@@ -821,24 +848,79 @@ def run_experiment(seed=None, show_viewer=True):
     if v is not None:
         v.close()
 
-    return {
-        "xy_error": xy_error,
-        "upright": upright,
-        "ik_ok": ik_ok,
-    }
+    return metrics
+
+
+# ══════════════════════════════════════════════════════════════
+#  Main
+# ══════════════════════════════════════════════════════════════
+
+def print_metrics_table(all_metrics):
+    print("\n" + "=" * 80)
+    print(f"{'Seed':>6} | {'Table':<10} | {'XY Err (mm)':>11} | {'Upright':>7} | {'IK OK':>5}")
+    print("-" * 80)
+
+    all_xy = []
+    all_upright = []
+    all_ik = []
+
+    for seed, experiment_metrics in all_metrics:
+        for m in experiment_metrics:
+            xy_mm = m["xy_error"] * 1000
+            up_str = "Y" if m["upright"] else "N"
+            ik_str = "Y" if m["ik_ok"] else "N"
+            print(f"{seed:>6} | {m['table']:<10} | {xy_mm:>11.1f} | {up_str:>7} | {ik_str:>5}")
+            all_xy.append(m["xy_error"])
+            all_upright.append(m["upright"])
+            all_ik.append(m["ik_ok"])
+
+    print("=" * 80)
+    n = len(all_xy)
+    if n > 0:
+        mean_xy = np.mean(all_xy) * 1000
+        std_xy = np.std(all_xy) * 1000
+        max_xy = np.max(all_xy) * 1000
+        upright_pct = sum(all_upright) / n * 100
+        ik_pct = sum(all_ik) / n * 100
+        print(f"  Samples:       {n}")
+        print(f"  XY error:      {mean_xy:.1f} +/- {std_xy:.1f} mm  (max {max_xy:.1f} mm)")
+        print(f"  Upright rate:  {upright_pct:.1f}%")
+        print(f"  IK success:    {ik_pct:.1f}%")
+    print("=" * 80)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Top-down grasp of standing chess piece — single table")
+        description="Top-down grasp & place — 4 standing pieces on 4 tables")
     parser.add_argument("seed", nargs="?", type=int, default=None,
                         help="Random seed for reproducibility")
+    parser.add_argument("--markers", action="store_true",
+                        help="Show all debug markers (grasp targets, etc.)")
+    parser.add_argument("--eval", type=int, default=None, metavar="N",
+                        help="Run N headless experiments and print results table")
     args = parser.parse_args()
 
-    seed = args.seed
-    if seed is not None:
-        print(f"Using seed: {seed}")
-    print("=" * 60)
-    print("  TOP-DOWN GRASP — STANDING PIECE")
-    print("=" * 60)
-    run_experiment(seed=seed, show_viewer=True)
+    if args.eval is not None:
+        print(f"Running {args.eval} evaluation experiments (headless)...")
+        all_metrics = []
+        for exp in range(args.eval):
+            seed = exp if args.seed is None else args.seed + exp
+            print(f"\n{'='*60}")
+            print(f"  EXPERIMENT {exp + 1}/{args.eval}  (seed={seed})")
+            print(f"{'='*60}")
+            m = run_experiment(seed=seed, show_viewer=False, show_markers=False)
+            all_metrics.append((seed, m))
+        print_metrics_table(all_metrics)
+    else:
+        seed = args.seed
+        if seed is not None:
+            print(f"Using seed: {seed}")
+        print("=" * 60)
+        print("  TOP-DOWN GRASP & PLACE — 4 STANDING PIECES, 4 TABLES")
+        print("=" * 60)
+        metrics = run_experiment(seed=seed, show_viewer=True, show_markers=args.markers)
+
+        print("\n--- Results ---")
+        for m in metrics:
+            xy_mm = m["xy_error"] * 1000
+            print(f"  {m['table']:<10}: XY err = {xy_mm:.1f}mm, Upright = {m['upright']}")

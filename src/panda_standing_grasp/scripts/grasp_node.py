@@ -5,16 +5,16 @@ ROS1 node: top-down grasp of a standing chess piece with Franka Panda.
 Uses frankapy for all robot control (no franka_ros / action clients needed).
 
 Subscribes:
-  /piece_pose   (geometry_msgs/PoseStamped)  — center of piece, Z up along piece
-  /place_target (geometry_msgs/PointStamped)  — desired placement position
-  /go           (std_msgs/Empty)             — publish to advance to next step
+  /king_vector        (geometry_msgs/PoseStamped)  — center of piece, Y up along piece
+  /chessboard/square_05 (geometry_msgs/PoseStamped) — target square pose (position used as drop)
+  /go                 (std_msgs/Empty)             — publish to advance to next step
 
 Publishes:
   /grasp_waypoints (visualization_msgs/MarkerArray) — labeled waypoints for RViz
   /current_step    (std_msgs/String)                — name of the step being executed
 
 Flow:
-  Receives piece_pose + place_target -> plans all waypoints.
+  Receives king_vector + square_05 pose -> plans all waypoints.
   Then waits for /go before each step:
     1. HOME        (open gripper, move to home)
     2. PRE-GRASP   (move above piece)
@@ -30,7 +30,7 @@ import threading
 import rospy
 import numpy as np
 
-from geometry_msgs.msg import PoseStamped, PointStamped, Point
+from geometry_msgs.msg import PoseStamped, Point
 from std_msgs.msg import Empty, String, ColorRGBA, Header
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -80,10 +80,10 @@ class GraspNode:
         self._go_event = threading.Event()
 
         # -- Subscribers --
-        piece_topic = rospy.get_param("~piece_pose_topic", "/piece_pose")
-        place_topic = rospy.get_param("~place_target_topic", "/place_target")
+        piece_topic = rospy.get_param("~piece_pose_topic", "/king_vector")
+        place_topic = rospy.get_param("~place_target_topic", "/chessboard/square_05")
         rospy.Subscriber(piece_topic, PoseStamped, self._piece_cb)
-        rospy.Subscriber(place_topic, PointStamped, self._place_cb)
+        rospy.Subscriber(place_topic, PoseStamped, self._place_cb)
         rospy.Subscriber("/go", Empty, self._go_cb)
 
         # -- Publishers --
@@ -106,7 +106,7 @@ class GraspNode:
         rospy.loginfo("Received piece pose: [%.3f, %.3f, %.3f]", p.x, p.y, p.z)
 
     def _place_cb(self, msg):
-        p = msg.point
+        p = msg.pose.position
         self.place_target = np.array([p.x, p.y, p.z])
         rospy.loginfo("Received place target: [%.3f, %.3f, %.3f]", p.x, p.y, p.z)
 
@@ -222,11 +222,11 @@ class GraspNode:
     # -- Main loop --
 
     def run(self):
-        rospy.loginfo("Waiting for /piece_pose ...")
+        rospy.loginfo("Waiting for /king_vector ...")
         while not rospy.is_shutdown() and self.piece_pose is None:
             rospy.sleep(0.1)
 
-        rospy.loginfo("Waiting for /place_target ...")
+        rospy.loginfo("Waiting for /chessboard/square_05 ...")
         while not rospy.is_shutdown() and self.place_target is None:
             rospy.sleep(0.1)
 
