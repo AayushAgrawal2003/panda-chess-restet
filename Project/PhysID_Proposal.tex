@@ -1,0 +1,84 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.55in, top=0.45in, bottom=0.45in]{geometry}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{xcolor}
+
+\titlespacing*{\section}{0pt}{5pt}{2pt}
+\titlespacing*{\subsection}{0pt}{3pt}{1pt}
+\titleformat{\section}{\normalfont\bfseries\normalsize}{\thesection.}{0.4em}{}
+\titleformat{\subsection}{\normalfont\bfseries\small}{\thesubsection.}{0.4em}{}
+\setlength{\parskip}{2pt}
+\setlength{\parindent}{0pt}
+\pagestyle{empty}
+
+\begin{document}
+
+\begin{center}
+{\Large \textbf{PhysID: Physical Property Fingerprinting via Manipulation}}\\[2pt]
+{\normalsize 16-662 Robot Autonomy --- Project Proposal}
+\end{center}
+
+\section{Problem Statement}
+
+Given a set of visually identical cubes with different hidden physical properties (mass, friction, stiffness, center of mass), can a Franka Emika Panda autonomously identify each cube by performing simple physical experiments and then sort them into labeled bins?
+
+Robots rely heavily on vision, but many task-critical properties are invisible. We use \textit{manipulation as perception}.
+
+\section{Approach}
+
+\subsection{Test Objects}
+We prepare 4--6 red cubes (5\,cm, identical appearance) with distinct physical profiles:
+
+\begin{center}
+\small
+\begin{tabularx}{0.95\textwidth}{lX}
+\toprule
+\textbf{Cube} & \textbf{Hidden Property} \\
+\midrule
+A & Light (50\,g), rigid, low friction (Teflon-coated) \\
+B & Heavy (300\,g), rigid, high friction (rubber-coated) \\
+C & Medium (150\,g), hollow/off-center CoM, rigid \\
+D & Medium (150\,g), deformable (foam core), uniform density \\
+E & Heavy (300\,g), rigid, low friction (metal-filled, Teflon) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Experiments the Robot Executes}
+
+Each experiment is a scripted motion primitive executed via FrankaPy/MoveIt:
+
+\begin{enumerate}[nosep,leftmargin=*]
+    \item \textbf{Weigh} --- Grasp, lift to fixed height, hold still 2\,s. Compute mass from joint torque residuals: $m = \tau_{\text{res}} / (J^T \cdot g)$. Separates 50\,g / 150\,g / 300\,g classes.
+    \item \textbf{Slide} --- Push cube across table at constant velocity (5\,cm/s). Measure steady-state force $\Rightarrow$ $\mu = F_{\text{push}} / (mg)$. Distinguishes Teflon ($\sim$0.04) vs rubber ($\sim$0.8).
+    \item \textbf{Squeeze} --- Close gripper with ramping force (0--20\,N over 3\,s). Record force vs.\ displacement. Rigid cubes: near-zero displacement; foam cube: measurable compression $\Rightarrow$ stiffness $k = \Delta F / \Delta x$.
+    \item \textbf{Shake} --- Sinusoidal wrist oscillation ($\pm$30\textdegree, 2\,Hz) per axis. Fit inertia model via least-squares on Newton-Euler equations. Off-center CoM produces asymmetric torque.
+    \item \textbf{Tilt} --- Rotate wrist 90\textdegree\ slowly. Torque-vs-angle profile deviates from uniform model if CoM is off-center. Cross-validates with shake.
+\end{enumerate}
+
+\subsection{System Architecture}
+
+\textbf{Perception} (AprilTags for cube pose) $\rightarrow$ \textbf{Experiment Planner} (Bayesian information-gain selector --- picks the most discriminating test next) $\rightarrow$ \textbf{Motion Executor} (FrankaPy) $\rightarrow$ \textbf{Estimator} (physics-based parameter fitting from F/T data) $\rightarrow$ \textbf{Classifier} (assigns cube ID when confidence $>$\,95\%) $\rightarrow$ \textbf{Sort into labeled bins}.
+
+The planner updates a belief distribution after each experiment and selects the action that maximally reduces remaining uncertainty. At most 3 experiments per cube.
+
+\section{Evaluation}
+\begin{itemize}[nosep,leftmargin=*]
+    \item \textbf{Classification accuracy}: confusion matrix over 20+ trials (target: $>$90\%)
+    \item \textbf{Information-gain vs.\ random}: compare experiment count needed to reach 95\% confidence
+    \item \textbf{Ablation}: which single experiment is most/least discriminating
+\end{itemize}
+
+\section{Key References}
+\begin{enumerate}[nosep,leftmargin=*]
+    \small
+    \item Kruzliak et al., ``Interactive Learning of Physical Object Properties Through Robot Manipulation,'' IROS 2024. \href{https://arxiv.org/abs/2404.07344}{arXiv:2404.07344}
+    \item Chen et al., ``Learning Object Properties Using Robot Proprioception via Differentiable Robot-Object Interaction,'' ICRA 2025. \href{https://arxiv.org/abs/2410.03920}{arXiv:2410.03920}
+    \item Lambert, ``Identifying Objects' Inertial Parameters with Robotic Manipulation,'' MIT MEng 2023. \href{https://dspace.mit.edu/handle/1721.1/151518}{MIT DSpace}
+\end{enumerate}
+
+\end{document}
